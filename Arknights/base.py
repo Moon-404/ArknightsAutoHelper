@@ -1,20 +1,31 @@
 import logging.config
-import os
 from collections import OrderedDict
-from random import randint, uniform
-from time import sleep
+from random import randint, uniform, gauss
+from time import sleep, monotonic
 
+from PIL import Image
+
+import imgreco
+import richlog
 from ADBShell import ADBShell
 from Arknights.BattleSelector import BattleSelector
-from Arknights.Binarization import binarization_image
 from Arknights.click_location import *
 from Arknights.flags import *
-from Baidu_api import *
 from config import *
+from . import ocr
 
 os.path.join(os.path.abspath("../"))
-logging.config.fileConfig(CONFIG_PATH + 'logging.ini')
+logging.config.fileConfig(os.path.join(CONFIG_PATH, 'logging.ini'))
 logger = logging.getLogger('base')
+
+
+def _logged_ocr(image, *args, **kwargs):
+    logger = richlog.get_logger(os.path.join(SCREEN_SHOOT_SAVE_PATH, 'ocrlog.html'))
+    logger.loghtml('<hr/>')
+    logger.logimage(image)
+    ocrresult = ocr.engine.recognize(image, *args, **kwargs)
+    logger.logtext(repr(ocrresult.text))
+    return ocrresult
 
 
 class ArknightsHelper(object):
@@ -26,37 +37,29 @@ class ArknightsHelper(object):
         if adb_host is None:
             adb_host = ADB_HOST
         self.adb = ADBShell(adb_host=adb_host)
-        self.shell_log = ShellColor() if out_put else BufferColor(debug_level=DEBUG_LEVEL)
         self.__is_game_active = False
         self.__call_by_gui = call_by_gui
-        self.__rebase_to_null = " 1>nul 2>nul" \
-            if "win32" in os.sys.platform \
-            else " 1>/dev/null 2>/dev/null &" \
-            if enable_rebase_to_null else ""
         self.CURRENT_STRENGTH = 100
         self.selector = BattleSelector()
         self.ocr_active = True
         self.is_called_by_gui = call_by_gui
+        self.viewport = self.adb.get_screen_shoot().size
         if DEBUG_LEVEL >= 1:
             self.__print_info()
         if not call_by_gui:
-            self.is_ocr_active(current_strength)
-        self.shell_log.debug_text("成功初始化模块")
+            self.is_ocr_active()
+        logger.debug("成功初始化模块")
 
     def __print_info(self):
-        self.shell_log.info_text(
-            """当前系统信息:
-ADB 路径\t{adb_path}
-ADB 端口\t{adb_host}
-截图路径\t{screen_shoot_path}
-存储路径\t{storage_path}
-            """.format(
-                adb_path=ADB_ROOT, adb_host=ADB_HOST,
-                screen_shoot_path=SCREEN_SHOOT_SAVE_PATH, storage_path=STORAGE_PATH
-            )
-        )
+        logger.info('当前系统信息:')
+        logger.info('ADB 服务器:\t%s:%d', *ADB_SERVER)
+        logger.info('分辨率:\t%dx%d', *self.viewport)
+        logger.info('OCR 引擎:\t%s', ocr.engine.info)
+        logger.info('截图路径 (legacy):\t%s', SCREEN_SHOOT_SAVE_PATH)
+        logger.info('存储路径 (legacy):\t%s', STORAGE_PATH)
+
         if enable_baidu_api:
-            self.shell_log.info_text(
+            logger.info('%s', 
                 """百度API配置信息:
 APP_ID\t{app_id}
 API_KEY\t{api_key}
@@ -66,104 +69,42 @@ SECRET_KEY\t{secret_key}
                 )
             )
 
-    def __ocr_check(self,
-                    file_path,  # 输入文件路径
-                    save_path,  # 输出文件路径
-                    option=None,  # 附加选项
-                    change_image=True,  # 是否预处理图片
-                    invert=True):  # 图片颜色反转
-        self.shell_log.debug_text("base.__ocr_check")
-        global enable_baidu_api
-        if change_image:
-            if enable_baidu_api:
-                if enable_help_baidu:
-                    binarization_image(filepath=file_path, save_backup=True, invert_image=invert)
-                else:
-                    self.shell_log.info_text("不对百度ocr进行图像处理")
-            else:
-                binarization_image(filepath=file_path, save_backup=True, invert_image=invert)
-        if enable_baidu_api:
-            try:
-                ocr(file_path, save_path + ".txt")
-            except ConnectionError:
-                self.shell_log.failure_text("[!] 百度API无法连接")
-                enable_baidu_api = False
-                self.shell_log.helper_text("继续使用tesseract")
-        if not enable_baidu_api:
-            self.shell_log.debug_text("使用 tesseract OCR")
-            if option is not None:
-                option = " " + option
-            os.popen(
-                'tesseract "{}"  "{}" {}'.format(file_path, save_path, option) + self.__rebase_to_null
-            )
-            self.__wait(3)
+    def is_ocr_active(self):  # 如果不可用时用于初始化的理智值
+        logger.debug("base.is_ocr_active")
+        if not ocr.engine.check_supported():
+            self.ocr_active = False
+            return False
+        if ocr.engine.is_online:
+            # 不检查在线 OCR 服务可用性
+            self.ocr_active = True
+            return True
+        testimg = Image.open(os.path.join(STORAGE_PATH, "OCR_TEST_1.png"))
+        result = _logged_ocr(testimg, 'en', hints=[ocr.OcrHint.SINGLE_LINE])
+        if '51/120' in result:
+            self.ocr_active = True
+            logger.debug("OCR 模块工作正常")
         else:
-            self.shell_log.debug_text("使用 baidu api")
-
-    def is_ocr_active(self,  # 判断 OCR 是否可用
-                      current_strength=None):  # 如果不可用时用于初始化的理智值
-        self.shell_log.debug_text("base.is_ocr_active")
-        global enable_baidu_api
-        self.__ocr_check(STORAGE_PATH + "OCR_TEST_1.png",
-                         SCREEN_SHOOT_SAVE_PATH + "ocr_test_result", "--psm 7",
-                         change_image=False)
-        try:
-            with open(SCREEN_SHOOT_SAVE_PATH + "ocr_test_result.txt",
-                      "r", encoding="utf8") as f:
-                tmp = f.read()
-                test_1 = int(tmp.split("/")[0])
-                if test_1 == 51:
-                    self.ocr_active = True
-                    self.shell_log.debug_text("OCR 模块工作正常")
-                    return True
-                else:
-                    raise Exception
-        except Exception as e:
-            if enable_baidu_api:
-                enable_baidu_api = False
-                return self.is_ocr_active(current_strength)
-            self.shell_log.failure_text("OCR 模块识别错误, 使用初始理智值")
-            if current_strength is not None:
-                self.CURRENT_STRENGTH = current_strength
-            else:
-                self.shell_log.failure_text(
-                    "未装载初始理智值, 请在初始化 Arknights 助手时赋予初值")
-                if not self.is_called_by_gui:
-                    exit(0)
-                else:
-                    return False
+            self.ocr_active = False
+        return self.ocr_active
 
     def __del(self):
-        self.shell_log.debug_text("base.__del")
-        self.adb.ch_tools("shell")
-        self.adb.ch_abd_command(
-            "am force-stop {}".format(ArkNights_PACKAGE_NAME))
-        self.adb.run_cmd()
+        self.adb.run_device_cmd("am force-stop {}".format(ArkNights_PACKAGE_NAME))
 
     def destroy(self):
         self.__del()
 
-    def __check_apk_info_active(self):
-        self.adb.ch_tools("shell")
-        self.adb.ch_abd_command("dumpsys window windows | findstr \"Current\" > {}".format(
-            STORAGE_PATH + "package.txt"))
-        self.adb.run_cmd(DEBUG_LEVEL=0)
-
     def check_game_active(self):  # 启动游戏 需要手动调用
-        self.shell_log.debug_text("base.check_game_active")
-        self.__check_apk_info_active()
-        self.shell_log.debug_text("正在尝试启动游戏")
-        with open(STORAGE_PATH + "current.txt", "r", encoding="utf8") as f:
-            if ArkNights_PACKAGE_NAME in f.read():
-                self.__is_game_active = True
-                self.shell_log.debug_text("游戏已启动")
-            else:
-                self.adb.ch_tools("shell")
-                self.adb.ch_abd_command(
-                    "am start -n {}/{}".format(ArkNights_PACKAGE_NAME, ArkNights_ACTIVITY_NAME))
-                self.adb.run_cmd()
-                self.shell_log.debug_text("成功启动游戏")
-                self.__is_game_active = True
+        logger.debug("base.check_game_active")
+        current = self.adb.run_device_cmd('dumpsys window windows | grep mCurrentFocus').decode(errors='ignore')
+        logger.debug("正在尝试启动游戏")
+        logger.debug(current)
+        if ArkNights_PACKAGE_NAME in current:
+            self.__is_game_active = True
+            logger.debug("游戏已启动")
+        else:
+            self.adb.run_device_cmd("am start -n {}/{}".format(ArkNights_PACKAGE_NAME, ArkNights_ACTIVITY_NAME))
+            logger.debug("成功启动游戏")
+            self.__is_game_active = True
 
     @staticmethod
     def __wait(n=10,  # 等待时间中值
@@ -175,15 +116,39 @@ SECRET_KEY\t{secret_key}
 
     def mouse_click(self,  # 点击一个按钮
                     XY):  # 待点击的按钮的左上和右下坐标
-        self.shell_log.debug_text("base.mouse_click")
+        assert (self.viewport == (1280, 720))
+        logger.debug("base.mouse_click")
         xx = randint(XY[0][0], XY[1][0])
         yy = randint(XY[0][1], XY[1][1])
         logger.info("接收到点击坐标并传递xx:{}和yy:{}".format(xx, yy))
-        self.adb.get_mouse_click((xx, yy))
+        self.adb.touch_tap((xx, yy))
+        self.__wait(TINY_WAIT, MANLIKE_FLAG=True)
+
+    def tap_rect(self, rc):
+        hwidth = (rc[2] - rc[0]) / 2
+        hheight = (rc[3] - rc[1]) / 2
+        midx = rc[0] + hwidth
+        midy = rc[1] + hheight
+        xdiff = max(-1, min(1, gauss(0, 0.2)))
+        ydiff = max(-1, min(1, gauss(0, 0.2)))
+        tapx = int(midx + xdiff * hwidth)
+        tapy = int(midy + ydiff * hheight)
+        self.adb.touch_tap((tapx, tapy))
+        self.__wait(TINY_WAIT, MANLIKE_FLAG=True)
+
+    def tap_quadrilateral(self, pts):
+        acdiff = max(0, min(2, gauss(1, 0.2)))
+        bddiff = max(0, min(2, gauss(1, 0.2)))
+        halfac = (pts[2] - pts[0]) / 2
+        m = pts[0] + halfac * acdiff
+        pt2 = pts[1] if bddiff > 1 else pts[3]
+        halfvec = (pt2 - m) / 2
+        finalpt = m + halfvec * bddiff
+        self.adb.touch_tap(tuple(int(x) for x in finalpt))
         self.__wait(TINY_WAIT, MANLIKE_FLAG=True)
 
     def module_login(self):
-        self.shell_log.debug_text("base.module_login")
+        logger.debug("base.module_login")
         logger.info("发送坐标LOGIN_QUICK_LOGIN: {}".format(CLICK_LOCATION['LOGIN_QUICK_LOGIN']))
         self.mouse_click(CLICK_LOCATION['LOGIN_QUICK_LOGIN'])
         self.__wait(BIG_WAIT)
@@ -192,7 +157,7 @@ SECRET_KEY\t{secret_key}
         self.__wait(BIG_WAIT)
 
     def module_battle_slim(self,
-                           c_id,  # 待战斗的关卡编号
+                           c_id=None,  # 待战斗的关卡编号
                            set_count=1000,  # 战斗次数
                            check_ai=True,  # 是否检查代理指挥
                            **kwargs):  # 扩展参数:
@@ -208,253 +173,196 @@ SECRET_KEY\t{secret_key}
             True 完成指定次数的战斗
             False 理智不足, 退出战斗
         '''
-        self.shell_log.debug_text("base.module_battle_slim")
+        logger.debug("base.module_battle_slim")
         sub = kwargs["sub"] \
-            if "sub" in kwargs.keys() else False
+            if "sub" in kwargs else False
         auto_close = kwargs["auto_close"] \
-            if "auto_close" in kwargs.keys() else False
-        self_fix = kwargs["self_fix"] \
-            if "self_fix" in kwargs.keys() else False
+            if "auto_close" in kwargs else False
         if not sub:
-            self.shell_log.helper_text("战斗-选择{}...启动".format(c_id))
+            logger.info("战斗-选择{}...启动".format(c_id))
         if set_count == 0:
             return True
         # 如果当前不在进入战斗前的界面就重启
-        strength_end_signal = self.task_check(enable_ocr_check_is_TASK_page, c_id)
-        if strength_end_signal:
-            self.back_to_main()
-            self.__wait(3, MANLIKE_FLAG=False)
-            self.selector.id = c_id
-            logger.info("发送坐标BATTLE_CLICK_IN: {}".format(CLICK_LOCATION['BATTLE_CLICK_IN']))
-            self.mouse_click(CLICK_LOCATION['BATTLE_CLICK_IN'])
-            self.battle_selector(c_id)  # 选关
-            return self.module_battle_slim(c_id, set_count, check_ai, **kwargs)
-        # 确认代理指挥是否设置
-        if check_ai:
-            self.set_ai_commander()
-        count = 0
-        while not strength_end_signal:
-            # 初始化变量
-            battle_end_signal = False
-            if "MAX_TIME" in kwargs.keys():
-                battle_end_signal_max_execute_time = kwargs["MAX_TIME"]
-            else:
-                battle_end_signal_max_execute_time = BATTLE_END_SIGNAL_MAX_EXECUTE_TIME
-            # 查看剩余理智
-            strength_end_signal = not self.check_current_strength(
-                c_id, self_fix)
-            # 需要重新启动
-            if self.CURRENT_STRENGTH == -1:
-                self.back_to_main()
-                self.__wait(3, MANLIKE_FLAG=False)
-                self.selector.id = c_id
-                logger.info("发送坐标BATTLE_CLICK_IN: {}".format(CLICK_LOCATION['BATTLE_CLICK_IN']))
-                self.mouse_click(CLICK_LOCATION['BATTLE_CLICK_IN'])
-                self.battle_selector(c_id)  # 选关
-                return self.module_battle_slim(c_id, set_count - count, check_ai, **kwargs)
-            if strength_end_signal:
-                return True
-
-            self.shell_log.helper_text("开始战斗")
-            logger.info("发送坐标BATTLE_CLICK_START_BATTLE: {}".format(CLICK_LOCATION['BATTLE_CLICK_START_BATTLE']))
-            self.mouse_click(CLICK_LOCATION['BATTLE_CLICK_START_BATTLE'])
-            self.__wait(4, False)
-            logger.info("发送坐标BATTLE_CLICK_ENSURE_TEAM_INFO: {}".format(CLICK_LOCATION['BATTLE_CLICK_ENSURE_TEAM_INFO']))
-            self.mouse_click(CLICK_LOCATION['BATTLE_CLICK_ENSURE_TEAM_INFO'])
-            t = 0
-
-            while not battle_end_signal:
-                # 前 60s 不进行检测
-                if t == 0:
-                    self.__wait(BATTLE_NONE_DETECT_TIME)
-                    t += BATTLE_NONE_DETECT_TIME
-                else:
-                    self.__wait(BATTLE_FINISH_DETECT)
-                t += BATTLE_FINISH_DETECT
-                self.shell_log.helper_text("战斗进行{}s 判断是否结束".format(t))
-                # 判断是否升级
-                self.adb.get_screen_shoot(file_name="battle_status.png")
-                self.adb.get_sub_screen(
-                    file_name="battle_status.png",
-                    screen_range=MAP_LOCATION['BATTLE_INFO_LEVEL_UP'],
-                    save_name="level_up_real_time.png"
-                )
-                level_up_signal = False
-                # 检查升级情况
-                if enable_ocr_check_update:
-                    self.__ocr_check(
-                        SCREEN_SHOOT_SAVE_PATH + "level_up_real_time.png",
-                        SCREEN_SHOOT_SAVE_PATH + "1",
-                        "--psm 7 -l chi_sim"
-                    )
-                    level_up_text = "提升"
-                    with open(SCREEN_SHOOT_SAVE_PATH + "1.txt", "r", encoding="utf8") as f:
-                        tmp = f.readline()
-                    result = tmp.replace(' ', '')
-                    self.shell_log.debug_text("OCR 识别结果: {}".format(result))
-                    logger.info("OCR 识别等级提升结果: {}".format(result))
-                    level_up_signal = level_up_text in result
-                else:
-                    level_up_signal = self.adb.img_difference(
-                        img1=SCREEN_SHOOT_SAVE_PATH + "level_up_real_time.png",
-                        img2=STORAGE_PATH + "BATTLE_INFO_BATTLE_END_LEVEL_UP.png"
-                    ) > .7
-                if level_up_signal:
-                    battle_end_signal = True
-                    self.__wait(SMALL_WAIT, MANLIKE_FLAG=True)
-                    self.shell_log.helper_text("检测到升级")
-                    logger.info("发送坐标CENTER_CLICK: {}".format(CLICK_LOCATION['CENTER_CLICK']))
-                    self.mouse_click(CLICK_LOCATION['CENTER_CLICK'])
-                    self.__wait(SMALL_WAIT, MANLIKE_FLAG=True)
-                    logger.info("发送坐标CENTER_CLICK: {}".format(CLICK_LOCATION['CENTER_CLICK']))
-                    self.mouse_click(CLICK_LOCATION['CENTER_CLICK'])
-                    self.__wait(SMALL_WAIT, MANLIKE_FLAG=True)
-                else:
-                    self.adb.get_sub_screen(
-                        file_name="battle_status.png",
-                        screen_range=MAP_LOCATION['BATTLE_INFO_BATTLE_END'],
-                        save_name="battle_end.png"
-                    )
-                    if enable_ocr_check_end:
-                        self.__ocr_check(
-                            SCREEN_SHOOT_SAVE_PATH + "battle_end.png",
-                            SCREEN_SHOOT_SAVE_PATH + "1",
-                            "--psm 7 -l chi_sim"
-                        )
-                        end_text = "结束"
-                        with open(SCREEN_SHOOT_SAVE_PATH + "1.txt", "r", encoding="utf8") as f:
-                            tmp = f.readline()
-                        result = tmp.replace(' ', '')
-                        self.shell_log.debug_text("OCR 识别结果: {}".format(result))
-                        logger.info("OCR 识别关卡结束: {}".format(result))
-                        end_signal = end_text in result
-                    else:
-                        end_signal = self.adb.img_difference(
-                            img1=SCREEN_SHOOT_SAVE_PATH + "battle_end.png",
-                            img2=STORAGE_PATH + "BATTLE_INFO_BATTLE_END_TRUE.png"
-                        ) > .7
-                    if end_signal:
-                        battle_end_signal = True
-                        logger.info("发送坐标CENTER_CLICK: {}".format(CLICK_LOCATION['CENTER_CLICK']))
-                        self.mouse_click(CLICK_LOCATION['CENTER_CLICK'])
-                    else:
-                        battle_end_signal_max_execute_time -= 1
-                    if battle_end_signal_max_execute_time < 1:
-                        self.shell_log.failure_text("超过最大战斗时长!")
-                        battle_end_signal = True
-            count += 1
-            self.shell_log.info_text("当前战斗次数 {}".format(count))
-            if count >= set_count:
-                strength_end_signal = True
-            self.shell_log.info_text("战斗结束")
-            self.__wait(10, MANLIKE_FLAG=True)
+        global once_task_time
+        try:
+            for count in range(set_count):
+                if count == 0:
+                    once_task_time = 0
+                logger.info("开始第 %d 次战斗", count + 1)
+                self.operation_once_statemachine(c_id, )
+                logger.info("第 %d 次战斗完成", count + 1)
+                if count != set_count - 1:
+                    self.__wait(10, MANLIKE_FLAG=True)
+        except StopIteration:
+            logger.error('未能进行第 %d 次战斗', count + 1)
+            logger.error('已忽略余下的 %d 次战斗', set_count - count)
         if not sub:
             if auto_close:
-                self.shell_log.helper_text("简略模块{}结束，系统准备退出".format(c_id))
+                logger.info("简略模块{}结束，系统准备退出".format(c_id))
                 self.__wait(120, False)
                 self.__del()
             else:
-                self.shell_log.helper_text("简略模块{}结束".format(c_id))
+                logger.info("简略模块{}结束".format(c_id))
                 return True
         else:
-            self.shell_log.helper_text("当前任务{}结束，准备进行下一项任务".format(c_id))
+            self.__wait(MEDIUM_WAIT, False)
+            logger.info("当前任务{}结束，准备进行下一项任务".format(c_id))
             return True
 
-    def __check_is_on_setting(self):  # 检查是否在设置页面，True 为是
-        self.shell_log.debug_text("base.__check_is_on_setting")
-        self.adb.get_screen_shoot(
-            file_name="is_setting.png",
-            screen_range=MAP_LOCATION['INDEX_INFO_IS_SETTING']
-        )
-        if enable_ocr_debugger:
-            self.__ocr_check(
-                SCREEN_SHOOT_SAVE_PATH + "is_setting.png",
-                SCREEN_SHOOT_SAVE_PATH + "1",
-                "--psm 7 -l chi_sim",
-                change_image=False
-            )
-            end_text = "设置"
-            with open(SCREEN_SHOOT_SAVE_PATH + "1.txt", "r", encoding="utf8") as f:
-                tmp = f.readline()
-            result = tmp.replace(' ', '')
-            self.shell_log.debug_text("OCR 识别结果: {}".format(result))
-            logger.info("OCR 识别设置结果: {}".format(result))
-            return end_text in result
-        else:
-            return self.adb.img_difference(
-                img1=STORAGE_PATH + "INDEX_INFO_IS_SETTING.png",
-                img2=SCREEN_SHOOT_SAVE_PATH + "is_setting.png"
-            ) > .85
+    class operation_once_state:
+        state = None
+        stop = None
+        operation_start = None
 
-    def __check_is_on_notice(self):  # 检查是否有公告，True为是
-        self.shell_log.debug_text("base.__check_is_on_notice")
-        self.adb.get_screen_shoot(
-            file_name="is_notice.png",
-            screen_range=MAP_LOCATION['INDEX_INFO_IS_NOTICE']
-        )
-        if enable_ocr_debugger:
-            self.__ocr_check(
-                SCREEN_SHOOT_SAVE_PATH + "is_notice.png",
-                SCREEN_SHOOT_SAVE_PATH + "1",
-                "--psm 7 -l chi_sim",
-                change_image=False
-            )
-            end_text = "活动公告"
-            with open(SCREEN_SHOOT_SAVE_PATH + "1.txt", "r", encoding="utf8") as f:
-                tmp = f.readline()
-            result = tmp.replace(' ', '')
-            self.shell_log.debug_text("OCR 识别结果: {}".format(result))
-            logger.info("OCR 识别活动公告结果: {}".format(result))
-            return end_text in result
-        else:
-            return self.adb.img_difference(
-                img1=STORAGE_PATH + "INDEX_INFO_IS_NOTICE.png",
-                img2=SCREEN_SHOOT_SAVE_PATH + "is_notice.png"
-            ) > .85
+    def operation_once_statemachine(self, c_id):
+        smobj = ArknightsHelper.operation_once_state()
+
+        def on_prepare(smobj):
+            screenshot = self.adb.get_screen_shoot()
+            recoresult = imgreco.before_operation.recognize(screenshot)
+            not_in_scene = False
+            if not recoresult['AP']:
+                # ASSUMPTION: 只有在战斗前界面才能识别到右上角体力
+                not_in_scene = True
+            if recoresult['consume'] is None:
+                # ASSUMPTION: 所有关卡都显示并能识别体力消耗
+                not_in_scene = True
+
+            if (not not_in_scene) and c_id is not None:
+                # 如果传入了关卡 ID，检查识别结果
+                logger.info('当前画面关卡：%s', recoresult['operation'])
+                if recoresult['operation'] != c_id:
+                    not_in_scene = True
+
+            if not_in_scene:
+                logger.error('不在关卡界面，退出……')
+                raise StopIteration()
+
+            self.CURRENT_STRENGTH = int(recoresult['AP'].split('/')[0])
+            logger.info('当前理智 %d, 关卡消耗 %d', self.CURRENT_STRENGTH, recoresult['consume'])
+            if self.CURRENT_STRENGTH < int(recoresult['consume']):
+                logger.error('理智不足')
+                raise StopIteration()
+
+            if not recoresult['delegated']:
+                logger.info('设置代理指挥')
+                self.tap_rect(imgreco.before_operation.get_delegate_rect(self.viewport))
+
+            logger.info("开始行动")
+            self.tap_rect(imgreco.before_operation.get_start_operation_rect(self.viewport))
+            smobj.state = on_troop
+
+        def on_troop(smobj):
+            self.__wait(SMALL_WAIT, False)
+            logger.info('确认编队')
+            self.tap_rect(imgreco.before_operation.get_confirm_troop_rect(self.viewport))
+            smobj.operation_start = monotonic()
+            smobj.state = on_operation
+
+        def on_operation(smobj):
+            global once_task_time
+            if once_task_time == 0:
+                detect_time = BATTLE_NONE_DETECT_TIME
+            else:
+                detect_time = once_task_time
+            t = monotonic() - smobj.operation_start
+            if t < detect_time:
+                self.__wait(detect_time - t)
+                t = monotonic() - smobj.operation_start
+
+            logger.info('已进行 %.1f s，判断是否结束', t)
+
+            screenshot = self.adb.get_screen_shoot()
+            if imgreco.end_operation.check_level_up_popup(screenshot):
+                logger.info("检测到升级")
+                smobj.state = on_level_up_popup
+                once_task_time = t - 7
+                return
+            if imgreco.end_operation.check_end_operation(screenshot):
+                logger.info('战斗结束')
+                self.__wait(SMALL_WAIT)
+                smobj.state = on_end_operation
+                once_task_time = t - 7
+                return
+            logger.info('战斗未结束')
+            self.__wait(BATTLE_FINISH_DETECT)
+
+        def on_level_up_popup(smobj):
+            self.__wait(SMALL_WAIT, MANLIKE_FLAG=True)
+            logger.info('关闭升级提示')
+            self.tap_rect(imgreco.end_operation.get_dismiss_level_up_popup_rect(self.viewport))
+            self.__wait(SMALL_WAIT, MANLIKE_FLAG=True)
+            smobj.state = on_end_operation
+
+        def on_end_operation(smobj):
+            screenshot = self.adb.get_screen_shoot()
+            try:
+                # 掉落识别
+                drops = imgreco.end_operation.recognize(screenshot)
+                logger.info('掉落识别结果：%s', repr(drops))
+            except Exception as e:
+                print(e)
+            logger.info('离开结算画面')
+            self.tap_rect(imgreco.end_operation.get_dismiss_end_operation_rect(self.viewport))
+            smobj.stop = True
+
+        smobj.state = on_prepare
+        smobj.stop = False
+        smobj.operation_start = 0
+
+        while not smobj.stop:
+            oldstate = smobj.state
+            smobj.state(smobj)
+            if smobj.state != oldstate:
+                logger.debug('state changed to %s', smobj.state.__name__)
 
     def back_to_main(self):  # 回到主页
-        self.shell_log.debug_text("base.back_to_main")
-        self.shell_log.helper_text("返回主页ing...")
-        # 检测是否有公告，如果有就点掉，点掉公告就是在主页
-        if self.__check_is_on_notice():
-            self.shell_log.helper_text("触发公告，点掉公告")
-            logger.info("发送坐标CLOSE_NOTICE: {}".format(CLICK_LOCATION['CLOSE_NOTICE']))
-            self.mouse_click(CLICK_LOCATION['CLOSE_NOTICE'])
-            self.shell_log.helper_text("已回到主页")
-            self.__wait(SMALL_WAIT, True)
-            return
-        # 检测左上角是否有返回标志，有就返回，没有就结束
-        for i in range(5):
-            self.adb.get_screen_shoot(
-                file_name="is_return.png",
-                screen_range=MAP_LOCATION['INDEX_INFO_IS_RETURN']
-            )
-            if self.adb.img_difference(
-                    img1=STORAGE_PATH + "INDEX_INFO_IS_RETURN.png",
-                    img2=SCREEN_SHOOT_SAVE_PATH + "is_return.png"
-            ) > .75:
-                self.shell_log.helper_text("未回到主页，点击返回")
-                logger.info("发送坐标MAIN_RETURN_INDEX: {}".format(CLICK_LOCATION['MAIN_RETURN_INDEX']))
-                self.mouse_click(CLICK_LOCATION['MAIN_RETURN_INDEX'])
-                self.__wait(TINY_WAIT, True)
-                if self.__check_is_on_notice():
-                    self.shell_log.helper_text("触发公告，点掉公告")
-                    logger.info("发送坐标CLOSE_NOTICE: {}".format(CLICK_LOCATION['CLOSE_NOTICE']))
-                    self.mouse_click(CLICK_LOCATION['CLOSE_NOTICE'])
-                    break
-            else:
+        logger.debug("base.back_to_main")
+        logger.info("返回主页...")
+        while True:
+            screenshot = self.adb.get_screen_shoot()
+
+            if imgreco.main.check_main(screenshot):
                 break
-        if self.__check_is_on_setting():
-            self.shell_log.helper_text("触发设置，返回")
-            logger.info("发送坐标MAIN_RETURN_INDEX: {}".format(CLICK_LOCATION['MAIN_RETURN_INDEX']))
-            self.mouse_click(CLICK_LOCATION['MAIN_RETURN_INDEX'])
-        self.shell_log.helper_text("已回到主页")
-        self.__wait(SMALL_WAIT, True)
+
+            # 检查是否有返回按钮
+            if imgreco.common.check_nav_button(screenshot):
+                logger.info('发现返回按钮，点击返回')
+                self.tap_rect(imgreco.common.get_nav_button_back_rect(self.viewport))
+                # FIXME: 检查基建退出提示
+                self.__wait(SMALL_WAIT)
+                # 点击返回按钮之后重新检查
+                continue
+
+            if imgreco.common.check_get_item_popup(screenshot):
+                logger.info('当前为获得物资画面，关闭')
+                self.tap_rect(imgreco.common.get_reward_popup_dismiss_rect(self.viewport))
+                self.__wait(SMALL_WAIT)
+                continue
+
+            # 检查是否在设置画面
+            if imgreco.common.check_setting_scene(screenshot):
+                logger.info("当前为设置/邮件画面，返回")
+                self.tap_rect(imgreco.common.get_setting_back_rect(self.viewport))
+                self.__wait(SMALL_WAIT)
+                continue
+
+            # 检测是否有关闭按钮
+            rect, confidence = imgreco.common.find_close_button(screenshot)
+            if confidence > 0.9:
+                logger.info("发现关闭按钮")
+                self.tap_rect(rect)
+                self.__wait(SMALL_WAIT)
+                continue
+
+            raise RuntimeError('未知画面')
+        logger.info("已回到主页")
 
     def module_battle(self,  # 完整的战斗模块
                       c_id,  # 选择的关卡
                       set_count=1000):  # 作战次数
-        self.shell_log.debug_text("base.module_battle")
+        logger.debug("base.module_battle")
+        assert (self.viewport == (1280, 720))
         self.back_to_main()
         self.__wait(3, MANLIKE_FLAG=False)
         self.selector.id = c_id
@@ -469,20 +377,20 @@ SECRET_KEY\t{secret_key}
         return True
 
     def main_handler(self, task_list=None, clear_tasks=False):
-        self.shell_log.debug_text("base.main_handler")
+        logger.debug("base.main_handler")
         if task_list is None:
             task_list = OrderedDict()
 
-        self.shell_log.warning_text("装载模块...")
-        self.shell_log.warning_text("战斗模块...启动")
+        logger.info("装载模块...")
+        logger.info("战斗模块...启动")
         flag = False
         if task_list.__len__() == 0:
-            self.shell_log.failure_text("任务清单为空!")
+            logger.fatal("任务清单为空!")
 
         for c_id, count in task_list.items():
             if c_id not in MAIN_TASK_SUPPORT.keys():
                 raise IndexError("无此关卡!")
-            self.shell_log.helper_text("战斗{} 启动".format(c_id))
+            logger.info("战斗{} 启动".format(c_id))
             self.selector.id = c_id
             flag = self.module_battle(c_id, count)
 
@@ -490,179 +398,22 @@ SECRET_KEY\t{secret_key}
             if not self.__call_by_gui:
                 if clear_tasks:
                     self.clear_daily_task()
-                self.shell_log.warning_text("所有模块执行完毕... 60s后退出")
+                logger.info("所有模块执行完毕... 60s后退出")
                 self.__wait(60)
                 self.__del()
             else:
-                self.shell_log.warning_text("所有模块执行完毕")
+                logger.info("所有模块执行完毕")
         else:
             if not self.__call_by_gui:
-                self.shell_log.warning_text("发生未知错误... 60s后退出")
+                logger.error("发生未知错误... 60s后退出")
                 self.__wait(60)
                 self.__del()
             else:
-                self.shell_log.warning_text("发生未知错误... 进程已结束")
-
-    def task_check(self, enable_ocr_check, c_id):
-        # 检测是否在关卡页面
-        if enable_ocr_check:
-            self.adb.get_screen_shoot(
-                file_name="is_on_task.png",
-                screen_range=MAP_LOCATION['ENSURE_ON_TASK_PAGE_OCR'])
-            self.__ocr_check(SCREEN_SHOOT_SAVE_PATH + "is_on_task.png",
-                             SCREEN_SHOOT_SAVE_PATH + "1",
-                             "--psm 7", change_image=True, invert=True)
-            with open(SCREEN_SHOOT_SAVE_PATH + "1.txt", "r", encoding="utf8") as f:
-                tmp = f.readline()
-            result = tmp.replace(' ', '')
-            self.shell_log.debug_text("OCR 识别结果: {}".format(result))
-            logger.info("OCR 识别关卡界面结果: {}".format(result))
-            continue_run = c_id in result
-        else:
-            self.adb.get_screen_shoot(
-                file_name="is_on_task.png",
-                screen_range=MAP_LOCATION['ENSURE_ON_TASK_PAGE'])
-            if self.adb.img_difference(
-                    SCREEN_SHOOT_SAVE_PATH + "is_on_task.png",
-                    STORAGE_PATH + "ENSURE_ON_TASK_PAGE.png"
-            ) <= 0.8:
-                self.shell_log.debug_text("相似度对比失败")
-                continue_run = False
-            else:
-                self.shell_log.debug_text("相似度对比成功")
-                continue_run = True
-        if continue_run:
-            self.shell_log.info_text("确认处于关卡页面")
-            return False
-        else:
-            self.shell_log.failure_text("当前未处在关卡页面")
-            return True
-
-    def set_ai_commander(self):
-        self.shell_log.debug_text("base.set_ai_commander")
-        # 先点击保证图片一致
-        self.adb.get_screen_shoot(
-            file_name="is_ai.png",
-            screen_range=MAP_LOCATION['BATTLE_CLICK_AI_COMMANDER']
-        )
-        if self.adb.img_difference(
-                SCREEN_SHOOT_SAVE_PATH + "is_ai.png",
-                STORAGE_PATH + "BATTLE_CLICK_AI_COMMANDER_TRUE.png"
-        ) <= 0.8:
-            self.shell_log.helper_text("代理指挥未设置，设置代理指挥")
-            logger.info("发送坐标BATTLE_CLICK_AI_COMMANDER: {}".format(CLICK_LOCATION['BATTLE_CLICK_AI_COMMANDER']))
-            self.mouse_click(CLICK_LOCATION['BATTLE_CLICK_AI_COMMANDER'])
-        else:
-            self.shell_log.helper_text("代理指挥已设置")
-
-    def __check_current_strength(self):  # 检查当前理智是否足够
-        self.shell_log.debug_text("base.__check_current_strength")
-        assert self.ocr_active
-        self.__wait(SMALL_WAIT, False)
-        self.adb.get_screen_shoot(
-            file_name="strength.png",
-            screen_range=MAP_LOCATION["BATTLE_INFO_STRENGTH_REMAIN"]
-        )
-
-        self.__ocr_check(
-            SCREEN_SHOOT_SAVE_PATH + "strength.png",
-            SCREEN_SHOOT_SAVE_PATH + "1",
-            "--psm 7")
-        with open(SCREEN_SHOOT_SAVE_PATH + "1.txt", 'r', encoding="utf8") as f:
-            tmp = f.read()  #
-            try:
-                self.CURRENT_STRENGTH = int(tmp.split("/")[0])
-                self.shell_log.helper_text(
-                    "理智剩余 {}".format(self.CURRENT_STRENGTH))
-                logger.info("理智剩余 {}".format(self.CURRENT_STRENGTH))
-                return True
-            except Exception as e:
-                self.shell_log.failure_text("{}".format(e))
-                return False
-
-    def __check_current_strength_debug(self, c_id):
-        # 查看是否在素材页面
-        self.shell_log.debug_text("base.__check_current_strength_debug")
-        self.shell_log.helper_text("启动自修复模块,检查是否停留在素材页面")
-        self.adb.get_screen_shoot(
-            file_name="debug.png",
-            screen_range=MAP_LOCATION['BATTLE_DEBUG_WHEN_OCR_ERROR']
-        )
-        if enable_ocr_debugger:
-            self.__ocr_check(SCREEN_SHOOT_SAVE_PATH + "debug.png",
-                             SCREEN_SHOOT_SAVE_PATH + "debug",
-                             "--psm 7 -l chi_sim")
-            end_text = "掉落"
-            with open(SCREEN_SHOOT_SAVE_PATH + "debug.txt", 'r', encoding="utf8") as f:
-                tmp = f.readline()
-            tmp = tmp.replace(' ', '')
-            self.shell_log.debug_text("OCR 识别结果: {}".format(tmp))
-            if end_text in tmp:
-                self.shell_log.helper_text("检测 BUG 成功，系统停留在素材页面，请求返回...")
-                logger.info("传递点击坐标MAIN_RETURN_INDEX: {}".format(CLICK_LOCATION['MAIN_RETURN_INDEX']))
-                self.adb.get_mouse_click(
-                    CLICK_LOCATION['MAIN_RETURN_INDEX'], FLAG=None)
-                self.__check_current_strength()
-            else:
-                self.shell_log.failure_text("检测 BUG 失败，系统将返回主页重新开始")
-                self.CURRENT_STRENGTH = -1  # CURRENT_STRENGTH = -1 代表需要需要回到主页重来
-        else:
-            if self.adb.img_difference(
-                    img1=SCREEN_SHOOT_SAVE_PATH + "debug.png",
-                    img2=STORAGE_PATH + "BATTLE_DEBUG_CHECK_LOCATION_IN_SUCAI.png"
-            ) > 0.75:
-                self.shell_log.helper_text("检测 BUG 成功，系统停留在素材页面，请求返回...")
-                logger.info("传递点击坐标MAIN_RETURN_INDEX: {}".format(CLICK_LOCATION['MAIN_RETURN_INDEX']))
-                self.adb.get_mouse_click(
-                    CLICK_LOCATION['MAIN_RETURN_INDEX'], FLAG=None)
-                self.__check_current_strength()
-            else:
-                self.shell_log.failure_text("检测 BUG 失败，系统将返回主页重新开始")
-                self.CURRENT_STRENGTH = -1  # CURRENT_STRENGTH = -1 代表需要需要回到主页重来
-
-    def check_current_strength(self, c_id, self_fix=False):
-        self.shell_log.debug_text("base.check_current_strength")
-        if self.ocr_active:
-            self.__wait(SMALL_WAIT, False)
-            self.adb.get_screen_shoot(
-                file_name="strength.png",
-                screen_range=MAP_LOCATION["BATTLE_INFO_STRENGTH_REMAIN"]
-            )
-
-            self.__ocr_check(SCREEN_SHOOT_SAVE_PATH + "strength.png",
-                             SCREEN_SHOOT_SAVE_PATH + "1",
-                             "--psm 7")
-            with open(SCREEN_SHOOT_SAVE_PATH + "1.txt",
-                      'r', encoding="utf8") as f:
-                tmp = f.read()  #
-                try:
-                    self.CURRENT_STRENGTH = int(tmp.split("/")[0])
-                    self.shell_log.helper_text(
-                        "理智剩余 {}".format(self.CURRENT_STRENGTH))
-                    logger.info("理智剩余 {}".format(self.CURRENT_STRENGTH))
-                except Exception as e:
-                    self.shell_log.failure_text("{}".format(e))
-                    if self_fix:
-                        self.__check_current_strength_debug(c_id)
-                        if self.CURRENT_STRENGTH == -1:
-                            return False
-                    else:
-                        self.CURRENT_STRENGTH -= LIZHI_CONSUME[c_id]
-        else:
-            self.CURRENT_STRENGTH -= LIZHI_CONSUME[c_id]
-            self.shell_log.warning_text("OCR 模块未装载，系统将直接计算理智值")
-            self.__wait(TINY_WAIT)
-            self.shell_log.helper_text(
-                "理智剩余 {}".format(self.CURRENT_STRENGTH))
-
-        if self.CURRENT_STRENGTH - LIZHI_CONSUME[c_id] < 0:
-            self.shell_log.failure_text("理智不足 退出战斗")
-            return False
-        else:
-            return True
+                logger.error("发生未知错误... 进程已结束")
 
     def battle_selector(self, c_id, first_battle_signal=True):  # 选关
-        self.shell_log.debug_text("base.battle_selector")
+        logger.debug("base.battle_selector")
+        assert (self.viewport == (1280, 720))
         mode = self.selector.id_checker(c_id)  # 获取当前关卡所属章节
         if mode == 1:
             if first_battle_signal:
@@ -670,7 +421,7 @@ SECRET_KEY\t{secret_key}
                 self.mouse_click(XY=CLICK_LOCATION['BATTLE_SELECT_MAIN_TASK'])
                 logger.info("发送滑动坐标BATTLE_TO_MAP_LEFT: {}; FLAG=FLAGS_SWIPE_BIAS_TO_LEFT".format(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT']))
-                self.adb.get_mouse_swipe(
+                self.adb.touch_swipe(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT'],
                     FLAG=FLAGS_SWIPE_BIAS_TO_LEFT
                 )
@@ -681,13 +432,13 @@ SECRET_KEY\t{secret_key}
                         x = MAIN_TASK_CHAPTER_SWIPE[c_id[0]]
                     else:
                         x = MAIN_TASK_CHAPTER_SWIPE[c_id[1]]
-                    self.shell_log.helper_text("拖动 {} 次".format(x))
+                    logger.info("拖动 {} 次".format(x))
                     for x in range(0, x):
                         logger.info(
                             "发送滑动坐标BATTLE_TO_MAP_RIGHT: {}; FLAG=FLAGS_SWIPE_BIAS_TO_RIGHT".format(
                                 SWIPE_LOCATION['BATTLE_TO_MAP_RIGHT']
                             ))
-                        self.adb.get_mouse_swipe(
+                        self.adb.touch_swipe(
                             SWIPE_LOCATION['BATTLE_TO_MAP_RIGHT'], FLAG=FLAGS_SWIPE_BIAS_TO_RIGHT)
                         self.__wait(MEDIUM_WAIT)
 
@@ -710,31 +461,31 @@ SECRET_KEY\t{secret_key}
                 logger.info("发送滑动坐标BATTLE_TO_MAP_LEFT: {}; FLAG=FLAGS_SWIPE_BIAS_TO_LEFT".format(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT']
                 ))
-                self.adb.get_mouse_swipe(
+                self.adb.touch_swipe(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT'], FLAG=FLAGS_SWIPE_BIAS_TO_LEFT)
                 sleep(SMALL_WAIT)
                 logger.info("发送滑动坐标BATTLE_TO_MAP_LEFT: {}; FLAG=FLAGS_SWIPE_BIAS_TO_LEFT".format(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT']
                 ))
-                self.adb.get_mouse_swipe(
+                self.adb.touch_swipe(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT'], FLAG=FLAGS_SWIPE_BIAS_TO_LEFT)
                 sleep(SMALL_WAIT)
                 logger.info("发送滑动坐标BATTLE_TO_MAP_LEFT: {}; FLAG=FLAGS_SWIPE_BIAS_TO_LEFT".format(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT']
                 ))
-                self.adb.get_mouse_swipe(
+                self.adb.touch_swipe(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT'], FLAG=FLAGS_SWIPE_BIAS_TO_LEFT)
 
                 # 拖动到正确的地方
                 if c_id in MAIN_TASK_BATTLE_SWIPE.keys():
                     x = MAIN_TASK_BATTLE_SWIPE[c_id]
-                    self.shell_log.helper_text("拖动 {} 次".format(x))
+                    logger.info("拖动 {} 次".format(x))
                     for x in range(0, x):
                         logger.info(
                             "发送滑动坐标BATTLE_TO_MAP_RIGHT: {}; FLAG=FLAGS_SWIPE_BIAS_TO_RIGHT".format(
                                 SWIPE_LOCATION['BATTLE_TO_MAP_RIGHT']
                             ))
-                        self.adb.get_mouse_swipe(
+                        self.adb.touch_swipe(
                             SWIPE_LOCATION['BATTLE_TO_MAP_RIGHT'], FLAG=FLAGS_SWIPE_BIAS_TO_RIGHT)
                         sleep(5)
                 logger.info("发送坐标BATTLE_SELECT_MAIN_TASK_{}: {}".format(c_id, CLICK_LOCATION[
@@ -749,14 +500,13 @@ SECRET_KEY\t{secret_key}
             try:
                 X = DAILY_LIST[str(mode)][self.selector.get_week()][c_id[0:2]]
             except Exception as e:
-                self.shell_log.failure_text(
-                    e.__str__() + '\tclick_location 文件配置错误')
+                logger.error('\tclick_location 文件配置错误', exc_info=True)
                 X = None
                 exit(0)
             if first_battle_signal:
                 logger.info("发送滑动坐标BATTLE_TO_MAP_LEFT: {}; FLAG=FLAGS_SWIPE_BIAS_TO_LEFT".format(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT']))
-                self.adb.get_mouse_swipe(
+                self.adb.touch_swipe(
                     SWIPE_LOCATION['BATTLE_TO_MAP_LEFT'], FLAG=FLAGS_SWIPE_BIAS_TO_LEFT)
                 logger.info("发送坐标BATTLE_SELECT_MATERIAL_COLLECTION: {}".format(
                     CLICK_LOCATION['BATTLE_SELECT_MATERIAL_COLLECTION']))
@@ -779,8 +529,7 @@ SECRET_KEY\t{secret_key}
             try:
                 X = DAILY_LIST[str(mode)][self.selector.get_week()][c_id[3]]
             except Exception as e:
-                self.shell_log.failure_text(
-                    e.__str__() + '\tclick_location 文件配置错误')
+                logger.error('\tclick_location 文件配置错误', exc_info=True)
                 X = None
                 exit(0)
             if first_battle_signal:
@@ -805,7 +554,7 @@ SECRET_KEY\t{secret_key}
                 CLICK_LOCATION["BATTLE_SELECT_HEART_OF_SURGING_FLAME"]))
             self.mouse_click(
                 XY=CLICK_LOCATION["BATTLE_SELECT_HEART_OF_SURGING_FLAME"])
-            self.shell_log.helper_text(
+            logger.info(
                 "欢迎来到火蓝之心副本\n祝你在黑曜石音乐节上玩的愉快\n目前主舞台只支持OF-7,OF-8")
             try:
                 if c_id[-2] == "F":
@@ -827,82 +576,48 @@ SECRET_KEY\t{secret_key}
                         logger.info(
                             "发送滑动坐标BATTLE_TO_MAP_RIGHT: {}; FLAG=FLAGS_SWIPE_BIAS_TO_RIGHT".format(
                                 SWIPE_LOCATION['BATTLE_TO_MAP_RIGHT']))
-                        self.adb.get_mouse_swipe(SWIPE_LOCATION['BATTLE_TO_MAP_RIGHT'],
-                                                 FLAG=FLAGS_SWIPE_BIAS_TO_RIGHT)
+                        self.adb.touch_swipe(SWIPE_LOCATION['BATTLE_TO_MAP_RIGHT'],
+                                             FLAG=FLAGS_SWIPE_BIAS_TO_RIGHT)
                         self.__wait(MEDIUM_WAIT)
                     logger.info("发送坐标BATTLE_SELECT_HEART_OF_SURGING_FLAME_{}: {}".format(c_id, CLICK_LOCATION[
                         "BATTLE_SELECT_HEART_OF_SURGING_FLAME_{}".format(c_id)]))
                     self.mouse_click(
                         XY=CLICK_LOCATION["BATTLE_SELECT_HEART_OF_SURGING_FLAME_{}".format(c_id)])
                 else:
-                    self.shell_log.failure_text('click_location 文件配置错误')
+                    logger.error('click_location 文件配置错误')
                     exit(0)
             except Exception as e:
-                self.shell_log.failure_text(
-                    e.__str__() + 'click_location 文件配置错误')
+                logger.error('click_location 文件配置错误', exc_info=True)
                 exit(0)
 
     def clear_daily_task(self):
-        self.shell_log.debug_text("base.clear_daily_task")
-        self.shell_log.helper_text("领取每日任务")
+        logger.debug("base.clear_daily_task")
+        logger.info("领取每日任务")
         self.back_to_main()
-        logger.info("发送坐标TASK_CLICK_IN: {}".format(CLICK_LOCATION['TASK_CLICK_IN']))
-        self.mouse_click(CLICK_LOCATION['TASK_CLICK_IN'])
-        self.__wait(TINY_WAIT, True)
-        logger.info("发送坐标TASK_DAILY_TASK: {}".format(CLICK_LOCATION['TASK_DAILY_TASK']))
-        self.mouse_click(CLICK_LOCATION['TASK_DAILY_TASK'])
-        self.__wait(TINY_WAIT, True)
-        task_ok_signal = True
-        while task_ok_signal:
-            self.adb.get_screen_shoot(file_name="task_status.png")
-            self.shell_log.helper_text("正在检查任务状况")
-            self.adb.get_sub_screen(
-                file_name="task_status.png",
-                screen_range=MAP_LOCATION['TASK_INFO'],
-                save_name="task_status_1.png"
-            )
-            if enable_ocr_check_task:
-                self.__ocr_check(SCREEN_SHOOT_SAVE_PATH + "task_status_1.png",
-                                 SCREEN_SHOOT_SAVE_PATH + "1",
-                                 "--psm 7 -l chi_sim")
-                task_ok_text = "领取"
-                with open(SCREEN_SHOOT_SAVE_PATH + "1.txt", "r", encoding="utf8") as f:
-                    tmp = f.readline()
-                tmp = tmp.replace(' ', '')
-                self.shell_log.debug_text("OCR 识别结果: {}".format(tmp))
-                logger.info("OCR 每日任务结果: {}".format(tmp))
-                task_ok_signal = task_ok_text in tmp
-            else:
-                task_ok_signal = self.adb.img_difference(
-                    img1=SCREEN_SHOOT_SAVE_PATH + "task_status_1.png",
-                    img2=STORAGE_PATH + "TASK_COMPLETE.png"
-                ) > .7
-            if not task_ok_signal:  # 检查当前是否在获得物资页面
-                self.shell_log.debug_text("未检测到可领取奖励，检查是否在获得物资页面")
-                self.adb.get_sub_screen(
-                    file_name="task_status.png",
-                    screen_range=MAP_LOCATION['REWARD_GET'],
-                    save_name="task_status_2.png"
-                )
-                if enable_ocr_check_task:
-                    self.__ocr_check(SCREEN_SHOOT_SAVE_PATH + "task_status_2.png",
-                                     SCREEN_SHOOT_SAVE_PATH + "1",
-                                     "--psm 7 -l chi_sim")
-                    reward_text = "物资"
-                    with open(SCREEN_SHOOT_SAVE_PATH + "1.txt", "r", encoding="utf8") as f:
-                        tmp = f.readline()
-                    tmp = tmp.replace(' ', '')
-                    self.shell_log.debug_text("OCR 识别结果: {}".format(tmp))
-                    logger.info("OCR 物资识别结果: {}".format(tmp))
-                    task_ok_signal = reward_text in tmp
+        screenshot = self.adb.get_screen_shoot()
+        logger.info('进入任务界面')
+        # FIXME: 没有进入到任务界面，没有点击每日任务的操作
+        self.tap_quadrilateral(imgreco.main.get_task_corners(screenshot))
+        self.__wait(SMALL_WAIT)
+        screenshot = self.adb.get_screen_shoot()
+
+        hasbeginner = imgreco.task.check_beginners_task(screenshot)
+        if hasbeginner:
+            logger.info('发现见习任务，切换到每日任务')
+            self.tap_rect(imgreco.task.get_daily_task_rect(screenshot, hasbeginner))
+            self.__wait(TINY_WAIT)
+
+        while imgreco.task.check_collectable_reward(screenshot):
+            logger.info('完成任务')
+            self.tap_rect(imgreco.task.get_collect_reward_button_rect(self.viewport))
+            self.__wait(TINY_WAIT)
+            while True:
+                screenshot = self.adb.get_screen_shoot()
+                if imgreco.common.check_get_item_popup(screenshot):
+                    logger.info('领取奖励')
+                    self.tap_rect(imgreco.common.get_reward_popup_dismiss_rect(self.viewport))
+                    self.__wait(TINY_WAIT)
                 else:
-                    task_ok_signal = self.adb.img_difference(
-                        img1=SCREEN_SHOOT_SAVE_PATH + "task_status_2.png",
-                        img2=STORAGE_PATH + "REWARD_GET.png"
-                    ) > .7
-            if task_ok_signal:
-                self.shell_log.debug_text("当前有可领取奖励")
-                logger.info("发送坐标TASK_DAILY_TASK_CHECK: {}".format(CLICK_LOCATION['TASK_DAILY_TASK_CHECK']))
-                self.mouse_click(CLICK_LOCATION['TASK_DAILY_TASK_CHECK'])
-                self.__wait(2, False)
-        self.shell_log.helper_text("奖励已领取完毕")
+                    break
+            screenshot = self.adb.get_screen_shoot()
+        logger.info("奖励已领取完毕")
