@@ -31,6 +31,8 @@ def _check_okay(sock):
 
 def _read_hexlen(sock):
     textlen = int(_recvexactly(sock, 4), 16)
+    if textlen == 0:
+        return b''
     buf = _recvexactly(sock, textlen)
     return buf
 
@@ -63,6 +65,11 @@ class ADBClientSession:
         resp = self.service('host:devices').read_response().decode()
         devices = [tuple(line.split('\t')) for line in resp.splitlines()]
         return devices
+
+    def connect(self, device):
+        resp = self.service('host:connect:%s' % device).read_response()
+        if b'unable' in resp:
+            raise RuntimeError(resp)
 
     def device(self, devid=None):
         """switch to a device"""
