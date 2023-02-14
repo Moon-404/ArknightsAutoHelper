@@ -1,0 +1,64 @@
+name: 'bootstrapper package: runtime'
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - 'requirements.txt'
+
+jobs:
+  build-win-amd64:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - name: Set up Python 3.9 amd64
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.9
+        architecture: x64
+    - name: Install dependencies
+      run: |
+        set PYTHONENCODING=utf-8
+        set PYTHONLEGACYWINDOWSSTDIO=utf-8
+        set PYTHONUTF8=1
+        python -m pip install --upgrade pip
+        python -m venv venv
+        venv\Scripts\python -m pip install --upgrade pip wheel setuptools
+        venv\Scripts\python -m pip install -r requirements.txt
+      shell: cmd
+    - name: Make package
+      shell: cmd
+      run: |
+        where curl
+        python packaging/package2.py runtime
+    - name: Upload artifact
+      uses: actions/upload-artifact@v2.1.4
+      with:
+        name: runtime-nested-zip
+        path: build/runtime-cp39-win_amd64.zip
+    - name: delete old release
+      shell: powershell
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        git fetch --tags
+        $ErrorActionPreference = 'continue'
+        gh release delete bootstrapper-package-runtime -y
+        git push --delete origin bootstrapper-package-runtime
+        sleep 5
+    - name: prerelease
+      uses: "softprops/action-gh-release@v1"
+      with:
+        token: "${{ secrets.GITHUB_TOKEN }}"
+        name: "Bootstrapper Package: runtime"
+        tag_name: "bootstrapper-package-runtime"
+        prerelease: true
+        body: |
+          This release provides a package for [bootstrapper](https://github.com/ninthDevilHAUNSTER/ArknightsAutoHelper/releases/tag/bootstrapper-release) and is not meant to be used directly.
+
+        files: |
+          build/runtime-cp39-win_amd64.zip

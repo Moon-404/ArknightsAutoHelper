@@ -13,7 +13,7 @@ CLICK_LOCATION = {
     'TASK_CLICK_IN': ((727, 566), (894, 656)),
     'TASK_DAILY_TASK': ((667, 16), (683, 56)),
     'TASK_DAILY_TASK_CHECK': ((1013, 133), (1104, 158)),
-    
+
     # 主章节卡坐标
     "BATTLE_SELECT_MAIN_TASK": ((22, 636), (115, 684)),
     "BATTLE_SELECT_MAIN_TASK_1": ((688, 224), (1000, 519)),
@@ -42,9 +42,9 @@ CLICK_LOCATION = {
     "BATTLE_SELECT_MAIN_TASK_5-5": ((1006, 320), (1008, 322)),
     "BATTLE_SELECT_MAIN_TASK_S5-1": ((1060, 445), (1062, 447)),
     "BATTLE_SELECT_MAIN_TASK_5-10": ((985, 342), (987, 344)),
-    
+
     # 物资筹备相关
-    "BATTLE_SELECT_MATERIAL_COLLECTION": ((175,629),(287,694)),
+    "BATTLE_SELECT_MATERIAL_COLLECTION": ((175, 629), (287, 694)),
     "BATTLE_SELECT_MATERIAL_COLLECTION_0": ((167, 374), (169, 376)),
     "BATTLE_SELECT_MATERIAL_COLLECTION_1": ((451, 374), (453, 376)),
     "BATTLE_SELECT_MATERIAL_COLLECTION_2": ((738, 374), (740, 376)),
@@ -169,7 +169,7 @@ MAIN_TASK_SUPPORT = {
     'OF-F3': 15,
     'OF-F2': 10,
     'OF-F1': 6,
-    
+
     'slim': 99,
 
 }
@@ -282,9 +282,9 @@ LIZHI_CONSUME = {
     # OF HEART_OF_SURGING_FLAME 副本
     'OF-8': 20,
     'OF-7': 20,
-    # ==== 一下为门票消耗
+    # ==== 以下为门票消耗
     'OF-F4': 20,
-    'OF-F3': 15,  # 备注在 OF_Fx中，理智消耗会变为门票消耗。 为了保持一致，任然会提示是理智不足而不是门票不足
+    'OF-F3': 15,  # 备注在 OF_Fx 中，理智消耗会变为门票消耗。 为了保持一致，仍然会提示是理智不足而不是门票不足
     'OF-F2': 10,
     'OF-F1': 6,
 }
